@@ -1,48 +1,46 @@
 package main
 
 import (
-	"fmt"
-	"io"
+	"errors"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
-	"time"
-)
-
-var (
-	cacheSince = time.Now().Format(http.TimeFormat)
-	cacheUntil = time.Now().AddDate(0, 0, 7).Format(http.TimeFormat)
 )
 
 func main() {
+	url, _ := url.Parse(os.Getenv("FORESTRY_URL"))
+	proxy := httputil.NewSingleHostReverseProxy(url)
 
-	originServerURL, err := url.Parse(os.Getenv("FORESTRY_URL"))
-	if err != nil {
-		log.Fatal("invalid origin server URL")
-	}
-
-	reverseProxy := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		rw.Header().Set("Cache-Control", "max-age:290304000, public")
-		rw.Header().Set("Last-Modified", cacheSince)
-		rw.Header().Set("Expires", cacheUntil)
-
-		req.Host = originServerURL.Host
-		req.URL.Host = originServerURL.Host
-		req.URL.Scheme = originServerURL.Scheme
-		req.RequestURI = ""
-
-		originServerResponse, err := http.DefaultClient.Do(req)
-		if err != nil {
-			rw.WriteHeader(http.StatusInternalServerError)
-			_, _ = fmt.Fprint(rw, err)
-			return
+	proxy.ModifyResponse = func(r *http.Response) error {
+		if r.StatusCode == http.StatusNotFound {
+			return errors.New("NOT_FOUND")
 		}
 
-		rw.WriteHeader(http.StatusOK)
-		io.Copy(rw, originServerResponse.Body)
+		return nil
+	}
+
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if err.Error() == "NOT_FOUND" {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	}
+
+	http.HandleFunc("/http-check", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("OK"))
 	})
 
-	log.Fatal(http.ListenAndServe(os.Getenv("FORESTRY_LISTEN"), reverseProxy))
+	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		req.Host = req.URL.Host
 
+		proxy.ServeHTTP(w, req)
+	})
+
+	http.DefaultTransport.(*http.Transport).MaxIdleConns = 0
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 0
+
+	http.NotFoundHandler()
+
+	log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
 }
